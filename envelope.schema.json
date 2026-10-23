@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:context-hub:envelope:v1",
+  "title": "Context Hub source event envelope",
+  "type": "object",
+  "required": ["schema_version", "adapter", "session_id", "source_key", "cwd", "role", "text", "timestamp", "kind", "raw"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "adapter": {"type": "string"},
+    "session_id": {"type": "string"},
+    "source_key": {"type": "string"},
+    "cwd": {"type": "string"},
+    "role": {"type": ["string", "null"]},
+    "text": {"type": ["string", "null"]},
+    "timestamp": {"type": ["string", "number", "null"]},
+    "kind": {"type": "string"},
+    "raw": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

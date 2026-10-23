@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run from any working directory, with no installation or network access.
+HUB_CODE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHONPATH="$HUB_CODE_DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m context_hub "$@"

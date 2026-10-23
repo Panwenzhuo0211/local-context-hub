@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-context-hub"
+version = "0.3.0"
+description = "Local, read-only cross-agent context archive with shared matters and MCP retrieval for Codex and ZCode"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = []
+keywords = ["mcp", "codex", "ai-agents", "context", "local-first", "conversation-archive"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/Panwenzhuo0211/local-context-hub"
+
+[project.scripts]
+context-hub = "context_hub.cli:main"
+context-hub-mcp = "context_hub.mcp_server:main"
+context-hub-integrate = "context_hub.integration:main"
+
+[tool.setuptools.packages.find]
+include = ["context_hub*"]

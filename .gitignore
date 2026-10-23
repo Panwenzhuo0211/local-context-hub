@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+.env.*
+config.toml
+config.json
+*token*
+*credentials*
+*.sqlite*
+*.db*
+*.jsonl
+local-data/
+work/
