@@ -140,6 +140,8 @@ context-hub map --project "my thesis revision" --session codex:<session-id>
 | `register_memory_source` | Attach a local Markdown memory file to a matter |
 | `context_status` | Last background run status and errors |
 | `refresh_context` | Ask the background worker to run now |
+| `handoff_session` | Continue one specific archived session across agents — returns its todos, title and recent messages |
+| `prepare_resume` | Export an archived ZCode session as a native Codex session file; returns a ready-to-run `codex resume` command |
 
 Notes default to `proposed`; they are never silently promoted to accepted decisions, and
 a task reopened after `done` keeps its full history.

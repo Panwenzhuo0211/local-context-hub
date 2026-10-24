@@ -4,18 +4,20 @@ import getpass
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 APP=Path(__file__).resolve().parent
-DATA=Path.home()/'Library/Application Support/ContextHub'
+if sys.platform=='win32':
+    DATA=Path(os.environ.get('LOCALAPPDATA') or Path.home()/'AppData/Local')/'ContextHub'
+else:
+    DATA=Path.home()/'Library/Application Support/ContextHub'
 
 
 def main():
     os.umask(0o077)
-    binary=APP/'tunnel-client/tunnel-client'
+    binary=APP/'tunnel-client'/'tunnel-client.exe' if sys.platform=='win32' else APP/'tunnel-client/tunnel-client'
     access=DATA/'chatgpt-access.json'
     if not binary.is_file() or not access.is_file():
         raise SystemExit('请先完成 Context Hub 本地接入端安装。')
@@ -31,7 +33,11 @@ def main():
     env=os.environ.copy();env['CONTROL_PLANE_API_KEY']=key
     env['XDG_CONFIG_HOME']=str(DATA/'tunnel-config')
     env['XDG_STATE_HOME']=str(DATA/'tunnel-state')
-    command=shlex.join([sys.executable,str(APP/'chatgpt-entry.py'),'--access-file',str(access)])
+    if sys.platform=='win32':
+        command=subprocess.list2cmdline([sys.executable,str(APP/'chatgpt-entry.py'),'--access-file',str(access)])
+    else:
+        import shlex
+        command=shlex.join([sys.executable,str(APP/'chatgpt-entry.py'),'--access-file',str(access)])
     args=[str(binary),'runtimes','connect','--alias','context-hub-chatgpt','--profile','context-hub-chatgpt',
           '--profile-dir',str(DATA/'tunnel-profiles'),'--tunnel-id',tunnel,'--mcp-command',command,
           '--runtime-api-key','env:CONTROL_PLANE_API_KEY']

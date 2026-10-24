@@ -104,7 +104,8 @@ class MattersTests(unittest.TestCase):
         requests=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2024-11-05'}},
                   {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'continue_matter','arguments':{'query':'专利'}}}]
         result=subprocess.run([sys.executable,'-m','context_hub.mcp_server','--data-dir',str(self.root)],
-                              input=''.join(json.dumps(r)+'\n' for r in requests),text=True,encoding='utf-8',capture_output=True,timeout=10)
+                              input=''.join(json.dumps(r)+'\n' for r in requests),text=True,encoding='utf-8',
+                              capture_output=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
         lines=[json.loads(x) for x in result.stdout.splitlines()];self.assertEqual(len(lines),2)
         self.assertEqual(json.loads(lines[1]['result']['content'][0]['text'])['status'],'ready')
@@ -119,6 +120,122 @@ class MattersTests(unittest.TestCase):
                 with self.assertRaises(ValueError):tick(self.root,True)
             self.assertEqual(json.loads((self.root/'background-status.json').read_text())['status'],'error')
         finally:source.rmdir()
+    def test_short_query_substring_fallback(self):
+        single=self.m.search('权')
+        self.assertTrue(single)
+        self.assertTrue(all('权' in x['excerpt'] for x in single))
+        self.assertFalse(self.m.search('绝不出现的字串xyzq'))
+
+    def test_auto_link_incremental_and_matters_rescan(self):
+        self.add('zcode','z2','session:z2','/patent','session',title='发明专利申请讨论')
+        self.m.index()
+        self.assertTrue(self.m.db.execute(
+            "SELECT 1 FROM links WHERE matter=? AND kind='session' AND target='zcode:z2' AND status='auto'",
+            (self.patent,)).fetchone())
+        brand=self.m.create('品牌事务',['示例应用'])['id']
+        self.m.index()
+        self.assertTrue(self.m.db.execute(
+            "SELECT 1 FROM links WHERE matter=? AND kind='session' AND target='zcode:z' AND status='auto'",
+            (brand,)).fetchone())
+
+    def test_freshness_gate_annotation(self):
+        import time as _time
+        cfg={'schema_version':1,'sources':{'zcode':str(self.root/'src')}}
+        (self.root/'config.json').write_text(json.dumps(cfg))
+        z=self.root/'src/cli/db';z.mkdir(parents=True);(z/'db.sqlite').write_bytes(b'x')
+        with self.m.db:
+            self.m.db.execute("INSERT OR REPLACE INTO state VALUES ('indexed_at',?)",
+                              ('{"value":'+str(_time.time()-600)+'}',))
+        f=self.m.context('专利')['freshness']
+        self.assertTrue(f['stale']);self.assertGreater(f['lag_seconds'],120)
+        self.assertIn('refresh_context',f['note'])
+
+    def test_digest_notes_and_note_search(self):
+        self.m.remember(self.patent,'codex','digest','会话摘要：方案对比','对比了甲乙方案，选甲，下一步补实验。',[])
+        self.assertIn('digest',[n['kind'] for n in self.m.context('专利')['notes']])
+        hits=self.m.search_notes('补实验')
+        self.assertTrue(hits and hits[0]['kind']=='digest')
+        self.assertEqual(self.m.search_notes('绝不出现的词组xyzq'),[])
+        r=Server(self.root,'zcode').call('search_context',{'query':'补实验'})
+        self.assertTrue(r['notes'] and r['records'] is not None)
+
+    def test_handoff_session_package(self):
+        result=self.m.handoff_session('zcode:z',messages=5)
+        self.assertEqual(result['title'],'示例应用 专利申请')
+        self.assertTrue(any('示例专利事项' in x['text'] for x in result['messages']))
+        self.assertTrue(result['untrusted'])
+        self.assertEqual(result['tools'],[])  # no tool parts in fixture
+        with self.assertRaises(ValueError):self.m.handoff_session('zcode:none')
+
+    def test_handoff_session_tool_history(self):
+        # Real part envelopes carry the part row as raw with data as a JSON string.
+        from context_hub.model import envelope
+        with self.store.db:
+            self.store.ingest(envelope('zcode','z','part:t1',
+                {'data':json.dumps({'type':'tool','tool':'Bash','callID':'call1',
+                                    'state':{'status':'completed','time':{'start':1,'end':105},
+                                             'input':{'command':'py test.py'},'output':'ok out'}}),
+                 'time_created':1},'/patent','assistant','',kind='tool'),self.config)
+        self.m.index()
+        result=self.m.handoff_session('zcode:z')
+        self.assertEqual(len(result['tools']),1)
+        t=result['tools'][0]
+        self.assertEqual(t['tool'],'Bash');self.assertEqual(t['output'],'ok out')
+        self.assertEqual(t['duration_ms'],104);self.assertFalse(t['is_error'])
+        self.assertEqual(t['input'].get('command'),'py test.py')
+
+    def test_handoff_codex_tool_history(self):
+        # Codex rollout envelope: raw.record.payload carries the function_call.
+        from context_hub.model import envelope
+        # Real Codex rollout envelopes wrap the jsonl line as raw.record.
+        record={'record':{'timestamp':'2026-10-24T00:00:00Z','type':'response_item',
+                          'payload':{'type':'function_call','name':'exec_command',
+                                     'arguments':'{"cmd":"ls"}','call_id':'fc1'}}}
+        record_out={'record':{'timestamp':'2026-10-24T00:00:01Z','type':'response_item',
+                              'payload':{'type':'function_call_output','call_id':'fc1',
+                                         'output':'file list'}}}
+        with self.store.db:
+            self.store.ingest(envelope('codex','c','rollout:10',record,'/code',
+                                       'assistant','',kind='response_item'),self.config)
+            self.store.ingest(envelope('codex','c','rollout:11',record_out,'/code',
+                                       'assistant','',kind='response_item'),self.config)
+        result=self.m.handoff_session('codex:c')
+        self.assertEqual(len(result['tools']),1)
+        tc=result['tools'][0]
+        self.assertEqual(tc['tool'],'exec_command')
+        self.assertEqual(tc['input'].get('cmd'),'ls')
+        self.assertEqual(tc['output'],'file list')
+
+    def test_prepare_resume_tool(self):
+        import tempfile
+        import context_hub.session_ir.emit_codex as emit_mod
+        server=Server(self.root,'zcode')
+        with tempfile.TemporaryDirectory() as td:
+            original=emit_mod.CODEX_HOME
+            emit_mod.CODEX_HOME=Path(td)
+            try:
+                r1=server.call('prepare_resume',{'session':'zcode:z'})
+                self.assertFalse(r1['mirror'])
+                self.assertTrue(r1['resume_command'].startswith('codex resume '))
+                r2=server.call('prepare_resume',{'session':'zcode:z'})
+                self.assertTrue(r2['mirror'])  # reused, no twin accumulation
+                self.assertEqual(r1['codex_session_id'],r2['codex_session_id'])
+                r3=server.call('prepare_resume',{'session':'zcode:z','refresh':True})
+                self.assertFalse(r3['mirror'])  # forced re-export, same id (idempotent)
+                self.assertEqual(r3['codex_session_id'],r1['codex_session_id'])
+                with self.assertRaises(ValueError):
+                    server.call('prepare_resume',{'session':'codex:c'})
+            finally:
+                emit_mod.CODEX_HOME=original
+
+    def test_report_html(self):
+        from context_hub.report import render
+        out=render(self.root)
+        text=out.read_text(encoding='utf-8')
+        self.assertTrue(out.name=='report.html')
+        self.assertIn('示例专利事项',text)
+        self.assertIn('运行报告',text)
+
     def test_output_boundaries_and_root_prefix(self):
         self.m.link(self.patent,'root',self.code,'explicit')
         self.add('codex','other','part:999',self.code_other,'text',text='权利要求不应跨目录误入')

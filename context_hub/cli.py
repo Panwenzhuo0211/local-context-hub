@@ -10,9 +10,40 @@ from .paths import default_data_dir
 from .store import Store, exclusive, atomic, safe_child
 from .views import render
 
-DEFAULT = default_data_dir()
+if sys.platform == 'win32':
+    _FALLBACK = Path(os.environ.get('LOCALAPPDATA') or Path.home()/'AppData/Local')/'ContextHub'
+else:
+    _FALLBACK = Path.home()/'Library/Application Support/ContextHub'
+
+def resolve_data_dir(fallback=_FALLBACK):
+    """Follow a relocation pointer so bulk data can live on another drive.
+
+    A one-line LOCATION file in the default directory redirects every entry
+    point (CLI, MCP servers, worker, installer) without environment plumbing.
+    """
+    env_override = os.environ.get('CONTEXT_HUB_DATA_DIR')
+    if env_override:
+        return Path(env_override).expanduser()
+    try:
+        target=Path((Path(fallback)/'LOCATION').read_text(encoding='utf-8').strip())
+        if target.is_absolute() and target!=Path(fallback) and target.exists():
+            return target
+    except OSError: pass
+    return Path(fallback)
+
+DEFAULT = resolve_data_dir()
+
+def setup_console():
+    """Windows consoles default to a legacy code page; UTF-8 avoids losing output."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
 
 def default_config():
+    # Opt-in sources only: an installed agent is not an enrolled one. Adding a
+    # source enrolls its full history; removing it stops scanning immediately.
     return {'schema_version':1, 'sources':{'codex':str(Path.home()/'.codex'),'zcode':str(Path.home()/'.zcode')},
             'projects':{}, 'session_projects':{}, 'generic_roots':[str(Path.home()/'.zcode/workspace/default')]}
 
@@ -26,39 +57,74 @@ def validate(root,config):
         if root==src or root.is_relative_to(src) or src.is_relative_to(root):
             raise ValueError('Data directory and source roots must not overlap')
     # Block recognizable cloud locations; local storage can still have OS backup.
-    if any(x in str(root).lower() for x in ('/mobile documents/','/cloudstorage/','/dropbox/')):
+    lowered=str(root).lower().replace('\\','/')
+    if any(x in lowered for x in ('/mobile documents/','/cloudstorage/','/dropbox/','/onedrive/')):
         raise ValueError('Cloud-backed data directory refused; choose a local directory')
 
-def sync(store,config,active_sources=None):
+def source_paths(config):
+    """Files whose mtimes reflect source freshness; cheap enough for query time."""
+    paths=[]
+    for name,root in config.get('sources',{}).items():
+        root=Path(root).expanduser().resolve()
+        if name=='codex':
+            paths += [root/f for f in ('state_5.sqlite','state_5.sqlite-wal',
+                                        'thread_history_1.sqlite','thread_history_1.sqlite-wal')]
+            for folder in ('sessions','archived_sessions'):
+                paths.append(root/folder)
+        if name=='zcode':
+            paths += [root/f for f in ('cli/db/db.sqlite','cli/db/db.sqlite-wal',
+                                        'v2/tasks-index.sqlite','v2/tasks-index.sqlite-wal')]
+        if name=='opencode':
+            paths += [root/f for f in ('opencode.db','opencode.db-wal')]
+    return paths
+
+CHUNK_RECORDS = 20000
+
+def sync(store,config,active_sources=None,progress=None):
     warnings=[];counts={};started=time.time()
-    # A failure rolls back records AND cursors together; previous archive remains valid.
-    with store.db:
+    # Records and their cursors commit together per chunk. A crash replays from the
+    # last committed cursor; digest dedup absorbs the overlap, so the previous
+    # archive stays valid and a first import of a large source can resume.
+    try:
         for name,root in config['sources'].items():
             if active_sources is not None and name not in active_sources:
                 counts[name]={'examined':0,'new_revisions':0,'unchanged_source':True}
                 continue
-            total=added=0
+            total=added=0;pending=0
             for event in ADAPTERS[name](root).records(store,warnings):
-                total+=1;added+=store.ingest(event,config)
+                total+=1;added+=store.ingest(event,config);pending+=1
+                if pending>=CHUNK_RECORDS:
+                    store.db.commit();store.flush_log();pending=0
+                    if progress:progress(name,total,added)
+            if pending:store.db.commit();store.flush_log()
             counts[name]={'examined':total,'new_revisions':added}
         mapping_signature=__import__('hashlib').sha256(dumps({k:config.get(k) for k in ('projects','session_projects','generic_roots')}).encode()).hexdigest()
         if store.cursor('mapping_signature').get('value')!=mapping_signature:
             store.reclassify(config)
             store.set_cursor('mapping_signature',{'value':mapping_signature})
-        result={'adapters':counts,'warnings':warnings,'elapsed_seconds':round(time.time()-started,3)}
+        shown=warnings[:50]
+        result={'adapters':counts,'warnings':shown,'elapsed_seconds':round(time.time()-started,3)}
+        if len(warnings)>len(shown):result['warnings_omitted']=len(warnings)-len(shown)
         store.db.execute('INSERT INTO runs(started,result) VALUES (?,?)',(started,dumps(result)))
-    return result
+        store.db.commit()
+        return result
+    except Exception:
+        store.db.rollback()
+        raise
 
 def main(argv=None):
-    os.umask(0o077);use_utf8_stdio()
+    os.umask(0o077)
+    setup_console()
     p=argparse.ArgumentParser(description='Local read-only ZCode ↔ Codex context archive')
     p.add_argument('--data-dir',type=Path,default=DEFAULT)
     sub=p.add_subparsers(dest='command',required=True)
-    sub.add_parser('init');sub.add_parser('sync');sub.add_parser('projects');sub.add_parser('backup')
+    sub.add_parser('init');syncp=sub.add_parser('sync')
+    syncp.add_argument('--progress',action='store_true',help='Report chunk progress to stderr during sync')
+    sub.add_parser('projects');sub.add_parser('backup')
     sessions=sub.add_parser('sessions');sessions.add_argument('--project')
     ex=sub.add_parser('export');ex.add_argument('--project',required=True);ex.add_argument('--target',choices=['either','codex','zcode'],default='either')
     ho=sub.add_parser('handoff');ho.add_argument('--project',required=True);ho.add_argument('--target',choices=['codex','zcode'],required=True)
-    note=sub.add_parser('note');note.add_argument('--project',required=True);note.add_argument('--author',choices=['user','codex','zcode'],required=True)
+    note=sub.add_parser('note');note.add_argument('--project',required=True);note.add_argument('--author',choices=['user','codex','zcode','opencode'],required=True)
     note.add_argument('--kind',choices=['memory','decision','task','opinion'],required=True)
     note.add_argument('--topic',required=True);note.add_argument('--body',required=True)
     note.add_argument('--evidence',type=int,action='append',default=[])
@@ -66,10 +132,54 @@ def main(argv=None):
     mp=sub.add_parser('map');mp.add_argument('--project',required=True)
     group=mp.add_mutually_exclusive_group(required=True);group.add_argument('--root',type=Path);group.add_argument('--session',help='adapter:session_id')
     sub.add_parser('matters')
+    sub.add_parser('report')
+    sub.add_parser('compact')
+    emit=sub.add_parser('emit',help='Emit an archived ZCode session as a native Codex session')
+    emit.add_argument('--session',required=True,help='zcode:<session_id>')
+    emit.add_argument('--target-dir',type=Path,default=None,help='Override Codex home (default: real ~/.codex)')
+    emit.add_argument('--dry',action='store_true',help='Build the IR and report, write nothing')
     context=sub.add_parser('context');context.add_argument('query')
     search=sub.add_parser('search');search.add_argument('query');search.add_argument('--matter');search.add_argument('--limit',type=int,default=10)
     sub.add_parser('context-status')
     args=p.parse_args(argv);root=args.data_dir.expanduser().resolve()
+    if args.command=='emit':
+        from .session_ir import restore_from_archive
+        from .session_ir import emit_codex, mirror_map
+        try:
+            if not args.session.startswith('zcode:'):
+                raise ValueError('Expected --session zcode:<session_id>')
+            store=Store(root)
+            try:
+                zid=args.session.split(':',1)[1]
+                ir=restore_from_archive(store, zid)
+                watermark=store.db.execute(
+                    "SELECT max(id) FROM revisions WHERE adapter='zcode' AND session=?",
+                    (zid,)).fetchone()[0]
+            finally:
+                store.close()
+            if args.dry:
+                kinds={}
+                for m in ir.moments: kinds[m.kind]=kinds.get(m.kind,0)+1
+                print(dumps({'ir_id':ir.id,'moments':len(ir.moments),'by_kind':kinds,
+                             'cwd':ir.cwd,'dry':True}))
+                return 0
+            result=emit_codex.render(ir, session_id=ir.id,
+                                     target_dir=args.target_dir)
+            mirror_map.record(root, zcode_id=zid,
+                              codex_id=result.session_id, source_watermark=watermark)
+            print(dumps({'codex_session_id':result.session_id,
+                         'path':str(result.primary_path),
+                         'resume_command':f'codex exec resume {result.session_id} \"...\"',
+                         'warnings':result.warnings}))
+            return 0
+        except (ValueError,OSError,__import__('sqlite3').Error) as e:
+            print('Context Hub: '+str(e),file=sys.stderr);return 1
+    if args.command=='report':
+        from .report import render
+        try:
+            print(dumps({'report':str(render(root))}));return 0
+        except (ValueError,OSError,__import__('sqlite3').Error) as e:
+            print('Context Hub: '+str(e),file=sys.stderr);return 1
     if args.command in ('matters','context','search','context-status'):
         from .mcp_server import Server
         name={'matters':'list_matters','context':'continue_matter','search':'search_context','context-status':'context_status'}[args.command]
@@ -91,15 +201,21 @@ def main(argv=None):
             if not config_path.exists():raise ValueError('Run init first')
             store=Store(root)
             try:
-                if args.command=='sync':print(dumps(sync(store,config)))
+                if args.command=='sync':
+                    progress=None
+                    if args.progress or sys.stderr.isatty():
+                        progress=lambda name,total,added: print(f'context-hub sync {name}: {total} examined, {added} new',
+                                                                 file=sys.stderr,flush=True)
+                    print(dumps(sync(store,config,progress=progress)))
+                elif args.command=='compact':
+                    print(dumps(store.compact()))
                 elif args.command=='projects':print(json.dumps(store.projects(),indent=2,ensure_ascii=False))
                 elif args.command=='sessions':
-                    from .model import unpack
                     result=[]
                     query="SELECT r.* FROM revisions r JOIN heads h ON r.id=h.revision_id WHERE r.source_key LIKE 'thread:%' OR r.source_key LIKE 'session:%'"
                     for r in store.db.execute(query):
                         if args.project and r['project']!=args.project:continue
-                        e=unpack(r['envelope'])
+                        e=unpack(store.envelope_of(r))
                         result.append({'adapter':e['adapter'],'session':e['session_id'],'project':r['project'],'cwd':e['cwd'],'title':e['raw'].get('title','')})
                     print(json.dumps(result,ensure_ascii=False,indent=2))
                 elif args.command=='backup':print(store.backup())

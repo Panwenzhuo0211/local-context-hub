@@ -24,6 +24,18 @@ class IntegrationTests(unittest.TestCase):
         install(self.home,app=self.home/'app',python='/python',activate=False)
         self.assertEqual((self.home/'.codex/AGENTS.md').read_text().count(BEGIN),1)
         self.assertTrue((self.home/'.codex/AGENTS.md').read_text().startswith('已有用户规则'))
+    def test_opencode_wiring_conditional(self):
+        oc=self.home/'.config/opencode';oc.mkdir(parents=True)
+        (oc/'opencode.json').write_text(json.dumps({'provider':{'keep':True}}))
+        install(self.home,app=self.home/'app',python='/python',activate=False)
+        cfg=json.loads((oc/'opencode.json').read_text(encoding='utf-8'))
+        self.assertEqual(cfg['provider'],{'keep':True})
+        self.assertIn('context-hub',cfg['mcp'])
+        self.assertTrue((oc/'AGENTS.md').exists())
+        uninstall(self.home,app=self.home/'app',activate=False)
+        cfg=json.loads((oc/'opencode.json').read_text(encoding='utf-8'))
+        self.assertNotIn('mcp',cfg)
+
     def test_conflicting_server_refused_before_write(self):
         p=self.home/'.codex/config.toml';p.write_text('[mcp_servers.context-hub]\ncommand="unrelated"\n')
         before=p.read_bytes()
