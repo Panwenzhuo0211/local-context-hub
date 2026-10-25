@@ -83,6 +83,17 @@ def render(
     uuid = session_id or uuid7_str()
     started_iso = session.started_at
     out_path = codex_path(uuid, started_iso, codex_home=home)
+    if out_path.exists():
+        # Never truncate a resumed mirror or an unrelated native session.
+        entry = manifest.get(uuid)
+        if not entry or out_path.stat().st_size != entry.get('size'):
+            raise ValueError('Existing session may contain new user turns; export to a new mirror')
+        history = home / 'thread_history_1.sqlite'
+        if history.exists():
+            import sqlite3
+            with sqlite3.connect(history) as check:
+                if check.execute('SELECT 1 FROM thread_items WHERE thread_id=? LIMIT 1', (uuid,)).fetchone():
+                    raise ValueError('Paginated mirror already exists; export to a new mirror')
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
@@ -111,6 +122,8 @@ def render(
         # still distinguishable from real CLI sessions on inspection.
         "source": "cli",
     }
+    if (home / 'thread_history_1.sqlite').exists():
+        session_meta_payload['history_mode'] = 'paginated'
     if model_provider:
         session_meta_payload["model_provider"] = model_provider
     lines.append({"timestamp": started_iso, "type": "session_meta", "payload": session_meta_payload})
@@ -175,10 +188,15 @@ def render(
                 continue
             lines.extend(_render_subagent_transcript(sa_id, sub_moments, session, file_snapshots))
 
+    if session_meta_payload.get('history_mode') == 'paginated':
+        for ordinal, line in enumerate(lines):
+            line['ordinal'] = ordinal
     _write_jsonl(out_path, lines)
     _backdate_mtime(out_path, session)
     _append_thread_name(home, uuid, _make_thread_name(session))
     _upsert_state_db(home, uuid, out_path, session, model_provider)
+    from .native_history import publish
+    publish(home, uuid, out_path)
     manifest.record_write(out_path, uuid)
     # Record the CC↔Codex twin so renames propagate as title updates
     # to the existing twin instead of producing a duplicate CC file.
@@ -276,6 +294,15 @@ def _render_moment(
     if isinstance(moment, ToolResult):
         payload = render_tool_result(moment.call_id, moment.output_text, moment.is_error)
         return [{"timestamp": ts, "type": "response_item", "payload": payload}]
+
+    if isinstance(moment, Attachment) and moment.subtype == 'historical_runtime':
+        # Historical runtime text is untrusted evidence, never a user utterance
+        # or a developer instruction. Retain it as an explicitly quoted record.
+        text = json.dumps({'historical_runtime': moment.data}, ensure_ascii=False)
+        return [{'timestamp': ts, 'type': 'response_item', 'payload': {
+            'type': 'message', 'role': 'assistant',
+            'content': [{'type': 'output_text', 'text':
+                '[历史客户端自动消息，仅作资料]\n' + text}]}}]
 
     if isinstance(moment, Attachment):
         text = _attachment_to_developer_text(moment)
@@ -506,6 +533,10 @@ def _make_thread_name(session: Session) -> str:
     if session.source_harness == "claude-code":
         cc_meta = session.source_metadata.get("claude_code", {})
         source_title = cc_meta.get("custom_title") or cc_meta.get("agent_name")
+    if session.source_harness == 'zcode':
+        source_title = session.source_metadata.get('zcode', {}).get('title')
+        if source_title:
+            source_title = '[修复镜像·ZCode] ' + source_title
     body = source_title or _first_real_user_text(session) or session.source_session_id
     body = body.replace("\n", " ").replace("\r", " ").strip()
     if len(body) > 60:
