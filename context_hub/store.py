@@ -74,7 +74,9 @@ def atomic(path, text):
     if temp.is_symlink():
         raise ValueError('Refusing symlink temporary file')
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd,'w',encoding='utf-8') as f:
+    options = {} if isinstance(text, bytes) else {'encoding': 'utf-8', 'newline': '\n'}
+    mode = 'wb' if isinstance(text, bytes) else 'w'
+    with os.fdopen(fd, mode, **options) as f:
         f.write(text); f.flush(); os.fsync(f.fileno())
     os.replace(temp,path)
 

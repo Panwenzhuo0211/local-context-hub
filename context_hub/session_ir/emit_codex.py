@@ -235,6 +235,9 @@ def _render_moment(
     file_snapshots: dict[str, FileStateCache] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert one canonical moment to 0+ Codex jsonl lines."""
+    from .policy import hidden_moment
+    if hidden_moment(moment):
+        return []
     cwd = session.cwd
     ts = moment.ts
     file_snapshots = file_snapshots or {}
