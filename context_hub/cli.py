@@ -10,10 +10,11 @@ from .paths import default_data_dir
 from .store import Store, exclusive, atomic, safe_child
 from .views import render
 
-if sys.platform == 'win32':
-    _FALLBACK = Path(os.environ.get('LOCALAPPDATA') or Path.home()/'AppData/Local')/'ContextHub'
-else:
-    _FALLBACK = Path.home()/'Library/Application Support/ContextHub'
+_FALLBACK=default_data_dir()
+if sys.platform not in ('darwin','win32') and not os.environ.get('CONTEXT_HUB_DATA_DIR'):
+    # Keep earlier Linux installations discoverable instead of orphaning data.
+    legacy=Path.home()/'Library/Application Support/ContextHub'
+    if (legacy/'config.json').is_file() and not (_FALLBACK/'config.json').exists():_FALLBACK=legacy
 
 def resolve_data_dir(fallback=_FALLBACK):
     """Follow a relocation pointer so bulk data can live on another drive.
@@ -116,8 +117,12 @@ def main(argv=None):
     os.umask(0o077)
     setup_console()
     p=argparse.ArgumentParser(description='Local read-only ZCode ↔ Codex context archive')
+    from . import __version__
+    p.add_argument('--version',action='version',version=__version__)
     p.add_argument('--data-dir',type=Path,default=DEFAULT)
     sub=p.add_subparsers(dest='command',required=True)
+    agents=sub.add_parser('agents',help='Owner-only enrollment, grants and revocation')
+    agents.add_argument('agent_args',nargs=argparse.REMAINDER)
     sub.add_parser('init');syncp=sub.add_parser('sync')
     syncp.add_argument('--progress',action='store_true',help='Report chunk progress to stderr during sync')
     sub.add_parser('projects');sub.add_parser('backup')
@@ -141,7 +146,11 @@ def main(argv=None):
     context=sub.add_parser('context');context.add_argument('query')
     search=sub.add_parser('search');search.add_argument('query');search.add_argument('--matter');search.add_argument('--limit',type=int,default=10)
     sub.add_parser('context-status')
+    sub.add_parser('doctor',help='Read-only version, freshness and source diagnostics')
     args=p.parse_args(argv);root=args.data_dir.expanduser().resolve()
+    if args.command=='agents':
+        from .agents import main as agents_main
+        return agents_main(['--data-dir',str(root),*args.agent_args])
     if args.command=='emit':
         from .session_ir import restore_from_archive
         from .session_ir import emit_codex, mirror_map
@@ -163,14 +172,12 @@ def main(argv=None):
                 print(dumps({'ir_id':ir.id,'moments':len(ir.moments),'by_kind':kinds,
                              'cwd':ir.cwd,'dry':True}))
                 return 0
-            result=emit_codex.render(ir, session_id=ir.id,
-                                     target_dir=args.target_dir)
-            mirror_map.record(root, zcode_id=zid,
-                              codex_id=result.session_id, source_watermark=watermark)
-            print(dumps({'codex_session_id':result.session_id,
-                         'path':str(result.primary_path),
-                         'resume_command':f'codex exec resume {result.session_id} \"...\"',
-                         'warnings':result.warnings}))
+            from .mcp_server import Server
+            from .matters import Matters
+            m=Matters(root)
+            try:result=Server(root).prepare_resume(m,{'session':args.session},target_dir=args.target_dir)
+            finally:m.close()
+            print(dumps(result))
             return 0
         except (ValueError,OSError,__import__('sqlite3').Error) as e:
             print('Context Hub: '+str(e),file=sys.stderr);return 1
@@ -180,9 +187,9 @@ def main(argv=None):
             print(dumps({'report':str(render(root))}));return 0
         except (ValueError,OSError,__import__('sqlite3').Error) as e:
             print('Context Hub: '+str(e),file=sys.stderr);return 1
-    if args.command in ('matters','context','search','context-status'):
+    if args.command in ('matters','context','search','context-status','doctor'):
         from .mcp_server import Server
-        name={'matters':'list_matters','context':'continue_matter','search':'search_context','context-status':'context_status'}[args.command]
+        name={'matters':'list_matters','context':'continue_matter','search':'search_context','context-status':'context_status','doctor':'context_status'}[args.command]
         values={'query':args.query} if hasattr(args,'query') else {}
         if args.command=='search':
             values['limit']=args.limit
@@ -199,7 +206,7 @@ def main(argv=None):
                 if not config_path.exists():atomic(config_path,json.dumps(config,indent=2,ensure_ascii=False)+'\n')
                 print(dumps({'data_dir':str(root),'config':str(config_path)}));return 0
             if not config_path.exists():raise ValueError('Run init first')
-            store=Store(root)
+            store=Store(root,migration_locked=True)
             try:
                 if args.command=='sync':
                     progress=None

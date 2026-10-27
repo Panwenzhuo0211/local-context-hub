@@ -9,7 +9,7 @@ Issues, bug reports and pull requests are welcome.
   in temporary directories; keep it that way.
 - **Tests required.** Every behavior change ships with a test
   (`python -m unittest discover -s tests`). CI runs the same suite on macOS, Linux and
-  Windows (Python 3.11/3.13) — platform-specific regressions are caught there, but note
+  Windows (Python 3.11/3.14) — platform-specific regressions are caught there, but note
   that local development on macOS cannot exercise Windows locking; rely on CI for that.
   On Windows, run tests with `PYTHONUTF8=1` (CI sets this) — fixtures are UTF-8.
 - **No new dependencies.** The core is deliberately standard-library-only.

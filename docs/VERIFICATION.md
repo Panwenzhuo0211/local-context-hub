@@ -5,8 +5,8 @@ adversarial conditions.
 
 ## Automated suite
 
-`python -m unittest discover -s tests` — 37 tests, under one second, standard library
-only. CI runs the same suite on macOS, Linux and Windows (Python 3.11/3.13).
+`python -m unittest discover -s tests` — standard library only. CI runs the same
+suite on macOS, Linux and Windows (Python 3.11/3.14).
 
 Coverage highlights:
 
@@ -24,6 +24,18 @@ Coverage highlights:
 - **Integration**: backups taken before any write, unrelated client config preserved,
   idempotent re-install, conflicting servers refused, uninstall preserves later unrelated
   config, single-client installs, `--dry-run` writes nothing, rule injection optional.
+- **New agents**: fixed identities, scoped matter/evidence checks, immediate
+  revocation and rotation, peer replies, stable discussion cursors and durable retries.
+- **File transport**: actual asynchronous broker query/write/readback in isolated
+  synthetic data; crash after note commit, partial JSON, size limits, request ID
+  collision, symlink refusal and owner shutdown after profile revocation.
+- **Usable installation**: fresh-owner wizard, packaged module entry points,
+  safe removal of a sole configured server, and Linux external scheduling.
+
+A real Muse client on macOS also completed file creation, matter retrieval,
+attributed writeback and cross-client note readback. Personal receipts and source
+conversations are retained locally, not included in this repository. Each new client
+must repeat acceptance; a heartbeat or enrolled profile alone does not prove it works.
 
 ## Counter-example suite for log ingestion
 

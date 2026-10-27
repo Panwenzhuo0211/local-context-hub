@@ -59,10 +59,22 @@ class RenderResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def render(
+def render(session, *, target_dir=None, data_dir=None, **kwargs):
+    """Create a new mirror under one writer lock; existing mirrors are immutable."""
+    from ..store import exclusive
+    home = (Path(target_dir) if target_dir else CODEX_HOME).expanduser().absolute()
+    if home.is_symlink():
+        raise ValueError('Refusing symlink Codex home')
+    ledger = Path(data_dir) if data_dir is not None else home / '.context-hub'
+    with exclusive(home, '.context-hub-export.lock'):
+        return _render(session, target_dir=home, data_dir=ledger, **kwargs)
+
+
+def _render(
     session: Session,
     *,
     target_dir: Path | str | None = None,
+    data_dir: Path | str | None = None,
     fidelity: str = "A",
     subagent_strategy: str = "drop",
     model_name: str = "gpt-5.5",
@@ -83,17 +95,18 @@ def render(
     uuid = session_id or uuid7_str()
     started_iso = session.started_at
     out_path = codex_path(uuid, started_iso, codex_home=home)
-    if out_path.exists():
-        # Never truncate a resumed mirror or an unrelated native session.
-        entry = manifest.get(uuid)
-        if not entry or out_path.stat().st_size != entry.get('size'):
-            raise ValueError('Existing session may contain new user turns; export to a new mirror')
-        history = home / 'thread_history_1.sqlite'
-        if history.exists():
+    from ..store import safe_child
+    safe_child(home, *out_path.relative_to(home).parts)
+    if out_path.exists() or out_path.is_symlink():
+        raise ValueError('Existing session is protected; export to a new mirror')
+    for filename, table, column in (('state_5.sqlite', 'threads', 'id'),
+                                     ('thread_history_1.sqlite', 'thread_items', 'thread_id')):
+        db = home / filename
+        if db.exists():
             import sqlite3
-            with sqlite3.connect(history) as check:
-                if check.execute('SELECT 1 FROM thread_items WHERE thread_id=? LIMIT 1', (uuid,)).fetchone():
-                    raise ValueError('Paginated mirror already exists; export to a new mirror')
+            with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as check:
+                if check.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1', (uuid,)).fetchone():
+                    raise ValueError('Existing session ID is protected; export to a new mirror')
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
@@ -197,7 +210,7 @@ def render(
     _upsert_state_db(home, uuid, out_path, session, model_provider)
     from .native_history import publish
     publish(home, uuid, out_path)
-    manifest.record_write(out_path, uuid)
+    manifest.record_write(out_path, uuid, data_dir)
     # Record the CC↔Codex twin so renames propagate as title updates
     # to the existing twin instead of producing a duplicate CC file.
     if session.source_harness == "claude-code" and session.source_session_id:
@@ -466,9 +479,16 @@ def _attachment_to_developer_text(att: Attachment) -> str:
 
 
 def _write_jsonl(path: Path, lines: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("x", encoding="utf-8") as f:
+        try:
+            import os
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         for ln in lines:
             f.write(json.dumps(ln, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _backdate_mtime(path: Path, session: Session) -> None:

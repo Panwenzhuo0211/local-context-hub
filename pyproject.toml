@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-context-hub"
-version = "0.4.0"
+version = "0.6.1"
 description = "Local, read-only cross-agent context archive with shared matters and MCP retrieval for Codex and ZCode"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,9 @@ Homepage = "https://github.com/Panwenzhuo0211/local-context-hub"
 context-hub = "context_hub.cli:main"
 context-hub-mcp = "context_hub.mcp_server:main"
 context-hub-integrate = "context_hub.integration:main"
+context-hub-agent = "context_hub.agent_client:main"
+context-hub-agent-gateway = "context_hub.agent_gateway:main"
+context-hub-file-bridge = "context_hub.file_bridge:main"
 
 [tool.setuptools.packages.find]
 include = ["context_hub*"]

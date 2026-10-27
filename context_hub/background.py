@@ -18,6 +18,17 @@ from .matters import Matters
 BACKUP_INTERVAL = 7*86400
 
 
+def publish_status(root,state):
+    path=safe_child(root,'background-status.json')
+    atomic(path,dumps(state))
+    try:
+        from .report import render
+        render(root)
+    except (OSError,ValueError,RuntimeError,sqlite3.Error) as e:
+        state['report_error']=str(e)[:300]
+        atomic(path,dumps(state))
+
+
 def fingerprint(config):
     paths=[]
     for name,root in config['sources'].items():
@@ -81,10 +92,11 @@ def tick(root=DEFAULT, force=False):
             signatures={name:fingerprint({**config,'sources':{name:source}}) for name,source in config['sources'].items()}
             signature=digest(dumps(signatures));now=time.time()
             if not force and old.get('fingerprint')==signature and now-old.get('last_success',0)<86400:
+                publish_status(root,{**old,'status':'ok','last_checked':now})
                 return {'status':'unchanged','last_success':old.get('last_success')}
             active=list(signatures) if force or now-old.get('last_success',0)>=86400 else [name for name in signatures if signatures[name]!=old.get('source_fingerprints',{}).get(name)]
             atomic(status_path,dumps({**old,'status':'running','started':now}))
-            store=Store(root)
+            store=Store(root,migration_locked=True)
             try:
                 result=sync(store,config,active_sources=active)
             finally:
@@ -104,10 +116,11 @@ def tick(root=DEFAULT, force=False):
         # in one glance, not buried among routine missing-log warnings.
         alarms=[w for w in result.get('warnings',[])
                 if 'adapter skipped' in w or 'Unsupported source schema' in w]
-        state={'status':'ok','last_success':time.time(),'fingerprint':signature,
+        state={'status':'ok','last_success':time.time(),'last_checked':time.time(),'fingerprint':signature,
                'sync':result,'index':index_result,'source_fingerprints':signatures,
                'pending_heads':pending,'index_lag_seconds':lag,'alarms':alarms}
-        atomic(status_path,dumps(state));return state
+        publish_status(root,state)
+        return state
     except RuntimeError as e:
         # An overlapping worker is routine; it must not overwrite the live status.
         if 'Another Context Hub' in str(e):return {'status':'busy'}

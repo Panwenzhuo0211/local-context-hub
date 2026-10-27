@@ -3,10 +3,11 @@ import json
 import shutil
 import sqlite3
 import time
+from html import escape
 from pathlib import Path
 
 PAGE = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="refresh" content="30">
 <title>Context Hub 报告</title>
 <style>
  body{font-family:"Segoe UI",system-ui,sans-serif;background:#101418;color:#d8dee6;margin:0;padding:32px}
@@ -34,7 +35,7 @@ __WARNINGS__
 </body></html>"""
 
 def _cards(items):
-    cells=''.join(f'<div class="card"><div class="k">{k}</div><div class="v {cls}">{v}</div></div>'
+    cells=''.join(f'<div class="card"><div class="k">{escape(str(k))}</div><div class="v {cls}">{escape(str(v))}</div></div>'
                   for k,v,cls in items)
     return f'<div class="grid">{cells}</div>'
 
@@ -59,6 +60,8 @@ def _health(root,status,mstate,db):
         return (f'{v:.0f} 秒',cls(v>600,v>120))
     lag_text,lag_cls=fmt_lag()
     return _cards([
+        ('程序版本',__import__('context_hub').__version__,''),
+        ('资料检查',__import__('context_hub.health',fromlist=['inspect']).inspect(root)['health'],''),
         ('后台状态',str(tick),cls(tick=='error',tick!='ok' and tick!='running')),
         ('投影滞后',lag_text,lag_cls),
         ('待投影记录',str(pending),'bad' if isinstance(pending,int) and pending>500 else 'ok'),
@@ -70,6 +73,12 @@ def _health(root,status,mstate,db):
     ])
 
 def render(root):
+    from .store import exclusive
+    with exclusive(root,'report.lock'):
+        return _render(root)
+
+
+def _render(root):
     root=Path(root)
     db=sqlite3.connect((root/'state.sqlite').as_uri()+'?mode=ro',uri=True)
     db.row_factory=sqlite3.Row
@@ -84,7 +93,10 @@ def render(root):
         mstate={'docs':m.execute('SELECT count(*) FROM docs').fetchone()[0]}
         matters=[dict(r) for r in m.execute('SELECT * FROM matters ORDER BY created')]
         rows=[]
+        def escaped(row):
+            return {k:escape(v) if isinstance(v,str) else v for k,v in dict(row).items()}
         for mat in matters:
+            mat=escaped(mat)
             notes=m.execute('SELECT count(*) FROM entries WHERE matter=?',(mat['id'],)).fetchone()[0]
             open_tasks=[dict(r) for r in m.execute(
                 "SELECT * FROM entries WHERE matter=? AND kind='task' ORDER BY created DESC",(mat['id'],))]
@@ -94,13 +106,13 @@ def render(root):
             links=m.execute("SELECT count(*) FROM links WHERE matter=? AND status!='rejected'",(mat['id'],)).fetchone()[0]
             recent=m.execute('SELECT * FROM entries WHERE matter=? ORDER BY created DESC LIMIT 2',(mat['id'],)).fetchall()
             notes_html=''.join(f'<div class="note">· <span class="author">{n["author"]}</span> [{n["kind"]}] {n["topic"]}：{n["body"][:80]}</div>'
-                               for n in recent) or '<div class="muted">尚无笔记</div>'
+                               for n in map(escaped,recent)) or '<div class="muted">尚无笔记</div>'
             rows.append(f'<tr><td><b>{mat["name"]}</b><div class="muted">{mat["description"][:60]}</div></td>'
                         f'<td>{notes}</td><td>{open_n}</td><td>{links}</td><td>{notes_html}</td></tr>')
         matters_html=('<table><tr><th>事项</th><th>笔记</th><th>未结任务</th><th>关联</th><th>最近笔记</th></tr>'
                       +''.join(rows)+'</table>') if matters else \
                       '<div class="empty">尚无事项。在 ZCode/Codex 里说「新建事项 XX」即可建立。</div>'
-        autos=[dict(r) for r in m.execute("SELECT * FROM links WHERE status='auto' ORDER BY updated DESC LIMIT 20")]
+        autos=[escaped(r) for r in m.execute("SELECT * FROM links WHERE status='auto' ORDER BY updated DESC LIMIT 20")]
         auto_html=('<table><tr><th>事项</th><th>类型</th><th>目标</th><th>理由</th></tr>'+
                    ''.join(f'<tr><td>{a["matter"][:12]}</td><td>{a["kind"]}</td>'
                            f'<td class="muted">{a["target"][:60]}</td><td class="note">{a["reason"]}</td></tr>' for a in autos)
@@ -110,17 +122,18 @@ def render(root):
         if row:
             try:warnings=json.loads(row[0]).get('warnings',[])[:10]
             except ValueError:pass
-        warn_html=''.join(f'<div class="note">· {w}</div>' for w in warnings) or '<div class="empty">最近一次同步无警告。</div>'
+        warn_html=''.join(f'<div class="note">· {escape(w)}</div>' for w in warnings) or '<div class="empty">最近一次同步无警告。</div>'
         page=(PAGE.replace('__GENERATED__',time.strftime('%Y-%m-%d %H:%M:%S'))
-                  .replace('__ROOT__',str(root))
+                  .replace('__ROOT__',escape(str(root)))
                   .replace('__HEALTH__',_health(root,status,mstate,db))
                   .replace('__MCOUNT__',str(len(matters)))
                   .replace('__MATTERS__',matters_html)
                   .replace('__ACOUNT__',str(len(autos)))
                   .replace('__CANDIDATES__',auto_html)
                   .replace('__WARNINGS__',warn_html))
-        out=root/'report.html'
-        out.write_text(page,encoding='utf-8')
+        from .store import atomic, safe_child
+        out=safe_child(root,'report.html')
+        atomic(out,page)
         return out
     finally:
         db.close();m.close()

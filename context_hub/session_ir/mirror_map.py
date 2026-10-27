@@ -31,22 +31,23 @@ def _read(data_dir: Path) -> dict:
 
 
 def _write(data_dir: Path, data: dict) -> None:
-    try:
-        path = _ledger_path(data_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
-    except OSError as e:
-        logger.warning('failed to write mirror ledger: %s', e)
+    from ..store import atomic
+    atomic(_ledger_path(data_dir), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def record(data_dir: Path, *, zcode_id: str, codex_id: str,
-           source_watermark: int | None = None) -> None:
+           source_watermark: int | None = None, path=None, parent_id=None) -> None:
     """Record a mirror pair with the source's revision watermark at export time."""
-    d = _read(data_dir)
-    d['zcode_to_codex'][zcode_id] = {'codex_id': codex_id,
-                                     'source_watermark': source_watermark}
-    d['codex_to_zcode'][codex_id] = zcode_id
-    _write(data_dir, d)
+    from ..store import exclusive
+    with exclusive(data_dir, 'mirror-map.lock'):
+        d = _read(data_dir)
+        d['zcode_to_codex'][zcode_id] = {'codex_id': codex_id,
+             'source_watermark': source_watermark, 'path':str(path) if path else None,
+             'parent_id':parent_id}
+        d['codex_to_zcode'][codex_id] = zcode_id
+        d.setdefault('history', {})[codex_id] = {'zcode_id':zcode_id, 'parent_id':parent_id,
+                                               'source_watermark':source_watermark}
+        _write(data_dir, d)
 
 
 def get_codex_for_zcode(data_dir: Path, zcode_id: str) -> str | None:
