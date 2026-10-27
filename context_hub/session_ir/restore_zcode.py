@@ -11,6 +11,7 @@ new (opal only covered Claude Code <-> Codex).
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import zlib
 import sqlite3
@@ -54,35 +55,32 @@ def restore_from_archive(store, session_id: str) -> Session:
         '''SELECT h.source_key, r.seg, r.off, r.len FROM heads h
            JOIN revisions r ON r.id=h.revision_id
            WHERE h.adapter='zcode' AND h.session=?''', (session_id,)).fetchall()
-    if not heads:
-        raise ValueError('Session not found in archive heads: ' + session_id)
 
     envelopes = [json.loads(zlib.decompress(read_blob(store.root, r['seg'], r['off'], r['len'])))
                  for r in heads]
     # A selected-session source snapshot restores parts whose forensic raw was
     # capped in older archives. Never scan unrelated sessions or mutate the source.
     config_path = store.root / 'config.json'
+    native_watermark=None
     if config_path.exists():
         config = json.loads(config_path.read_text(encoding='utf-8'))
         source_root = config.get('sources', {}).get('zcode')
         source_db = Path(source_root) / 'cli/db/db.sqlite' if source_root else None
         if source_db and source_db.is_file():
-            from ..adapters import readonly
-            with readonly(source_db) as con:
-                header = con.execute('SELECT * FROM session WHERE id=?', (session_id,)).fetchone()
-                if header:
-                    live = [{'source_key': 'session:' + session_id, 'raw': dict(header)}]
-                    for table, prefix in (('message', 'message:'), ('part', 'part:')):
-                        for row in con.execute(f'SELECT * FROM {table} WHERE session_id=?', (session_id,)):
-                            live.append({'source_key': prefix + row['id'], 'raw': dict(row)})
-                    try:
-                        for row in con.execute('SELECT * FROM todo WHERE session_id=?', (session_id,)):
-                            live.append({'source_key': 'todo:' + str(row['position']), 'raw': dict(row)})
-                    except sqlite3.OperationalError:
-                        pass
-                    envelopes = live
+            from ..native_source import zcode_rows,zcode_watermark
+            header,messages,native_parts,native_state=zcode_rows(config,session_id,include_state=True)
+            native_watermark=zcode_watermark(header,messages,native_parts,native_state)
+            live=[{'source_key':'session:'+session_id,'raw':header}]
+            for prefix,rows in (('message:',messages),('part:',native_parts)):
+                live.extend({'source_key':prefix+row['id'],'raw':row} for row in rows)
+            for todo in native_state.get('todo',[]):
+                live.append({'source_key':'todo:'+str(todo.get('position')),'raw':todo})
+            envelopes=live
+    if not envelopes:
+        raise ValueError('Session not found in native source or archive: '+session_id)
     session_row = None
     roles = {}
+    hidden_messages=set()
     parts = []
     todos = []
     unavailable = []
@@ -95,6 +93,8 @@ def restore_from_archive(store, session_id: str) -> Session:
             session_row = raw
         elif key.startswith('message:'):
             try:
+                from .policy import hidden_message
+                if hidden_message(json.loads(raw['data'])):hidden_messages.add(raw['id'])
                 roles[raw['id']] = (json.loads(raw['data']).get('role'),
                                     raw.get('time_created'))
             except (ValueError, KeyError, TypeError):
@@ -142,6 +142,9 @@ def restore_from_archive(store, session_id: str) -> Session:
         'title': session_row.get('title') or '',
         'directory': session_row.get('directory') or '',
     }
+    session.source_metadata['native_watermark']=native_watermark
+    if native_watermark:
+        session.source_metadata['native_part_digests']={p['id']:hashlib.sha256(p['data'].encode('utf-8')).hexdigest() for p in native_parts}
 
     # A part's moment ordering: by its message time, then its own time.
     def _sort_key(item):
@@ -160,7 +163,7 @@ def restore_from_archive(store, session_id: str) -> Session:
                 continue
             metadata = data.get('metadata') or {}
             runtime = metadata.get('runtimeMessage') or {}
-            generated = (data.get('synthetic') is True or
+            generated = (message_id in hidden_messages or data.get('synthetic') is True or
                          metadata.get('visibility') == 'model-only' or
                          runtime.get('source') is not None)
             ref = {'part': part_id, 'message': message_id}

@@ -139,6 +139,16 @@ def main(argv=None):
     sub.add_parser('matters')
     sub.add_parser('report')
     sub.add_parser('compact')
+    native=sub.add_parser('session-sync',help='Explicit append-only native session pairing/sync')
+    native.add_argument('sync_args',nargs=argparse.REMAINDER)
+    nctx=sub.add_parser('native-context',help='Read latest original context without native import/sync')
+    nctx.add_argument('session');nctx.add_argument('--limit',type=int,default=20);nctx.add_argument('--cursor')
+    nrec=sub.add_parser('native-record',help='Page a verified original context record')
+    nrec.add_argument('session');nrec.add_argument('record_ref');nrec.add_argument('--offset',type=int,default=0)
+    nrec.add_argument('--length',type=int,default=12000);nrec.add_argument('--watermark')
+    payload=sub.add_parser('native-payload',help='Read a verified native history attachment')
+    payload.add_argument('payload_ref');payload.add_argument('--offset',type=int,default=0)
+    payload.add_argument('--length',type=int,default=12000)
     emit=sub.add_parser('emit',help='Emit an archived ZCode session as a native Codex session')
     emit.add_argument('--session',required=True,help='zcode:<session_id>')
     emit.add_argument('--target-dir',type=Path,default=None,help='Override Codex home (default: real ~/.codex)')
@@ -151,6 +161,17 @@ def main(argv=None):
     if args.command=='agents':
         from .agents import main as agents_main
         return agents_main(['--data-dir',str(root),*args.agent_args])
+    if args.command=='native-payload':
+        from .native_payloads import read_payload
+        print(dumps(read_payload(root,args.payload_ref,offset=args.offset,length=args.length)));return 0
+    if args.command in ('native-context','native-record'):
+        from . import native_context
+        if args.command=='native-context':result=native_context.read_session(root,args.session,limit=args.limit,cursor=args.cursor)
+        else:result=native_context.read_record(root,args.session,args.record_ref,offset=args.offset,length=args.length,watermark=args.watermark)
+        print(dumps(result));return 0
+    if args.command=='session-sync':
+        from .session_sync import main as native_main
+        return native_main(['--data-dir',str(root)]+args.sync_args)
     if args.command=='emit':
         from .session_ir import restore_from_archive
         from .session_ir import emit_codex, mirror_map

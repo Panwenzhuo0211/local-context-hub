@@ -36,14 +36,15 @@ def _write(data_dir: Path, data: dict) -> None:
 
 
 def record(data_dir: Path, *, zcode_id: str, codex_id: str,
-           source_watermark: int | None = None, path=None, parent_id=None) -> None:
+           source_watermark: int | None = None, path=None, parent_id=None,
+           source_parts=None, source_fingerprint=None) -> None:
     """Record a mirror pair with the source's revision watermark at export time."""
     from ..store import exclusive
     with exclusive(data_dir, 'mirror-map.lock'):
         d = _read(data_dir)
         d['zcode_to_codex'][zcode_id] = {'codex_id': codex_id,
              'source_watermark': source_watermark, 'path':str(path) if path else None,
-             'parent_id':parent_id}
+             'parent_id':parent_id, 'source_parts': source_parts, 'source_fingerprint': source_fingerprint}
         d['codex_to_zcode'][codex_id] = zcode_id
         d.setdefault('history', {})[codex_id] = {'zcode_id':zcode_id, 'parent_id':parent_id,
                                                'source_watermark':source_watermark}
