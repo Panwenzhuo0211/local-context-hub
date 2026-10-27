@@ -12,6 +12,8 @@
 - Guided onboarding can create a first matter and opt into a file channel. Wheel
   integration uses packaged modules; Linux scheduling stays explicit.
 - Extend installation checks to all agent console scripts and enforce UTF-8 stdin.
+- Explicitly close upgrade, rollback and mirror-inspection SQLite handles, including
+  failure paths, so Windows can release the database files promptly.
 
 ## 0.6.0 — 2026-10-27
 

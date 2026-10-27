@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from . import __version__
 from .store import Store, atomic, exclusive
@@ -91,7 +92,7 @@ def install_release(source, runtime, data, commit=None):
             before=None
             legacy=data/'archive.sqlite'
             if legacy.exists():
-                with sqlite3.connect(legacy.as_uri()+'?mode=ro',uri=True) as db:
+                with closing(sqlite3.connect(legacy.as_uri()+'?mode=ro',uri=True)) as db:
                     before=db.execute('SELECT count(*) FROM revisions').fetchone()[0]
             validation=_validate_data(data)
             if 'state.sqlite' not in original and before is not None and validation['revisions']!=before:
@@ -133,8 +134,8 @@ def rollback_code(runtime, backup):
     legacy=backup/'data/archive.sqlite'
     current=backup.parent.parent/'state.sqlite'
     if legacy.exists() and not (backup/'data/state.sqlite').exists() and current.exists():
-        with sqlite3.connect(legacy.as_uri()+'?mode=ro',uri=True) as old, \
-             sqlite3.connect(current.as_uri()+'?mode=ro',uri=True) as new:
+        with closing(sqlite3.connect(legacy.as_uri()+'?mode=ro',uri=True)) as old, \
+             closing(sqlite3.connect(current.as_uri()+'?mode=ro',uri=True)) as new:
             old_count=old.execute('SELECT count(*) FROM revisions').fetchone()[0]
             new_count=new.execute('SELECT count(*) FROM revisions').fetchone()[0]
             query='SELECT * FROM heads ORDER BY adapter,session,source_key'

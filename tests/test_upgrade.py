@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import subprocess
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from context_hub import __version__
@@ -24,7 +25,7 @@ class UpgradeTests(unittest.TestCase):
             result=install_release(Path(__file__).parents[1],runtime,data,commit='test')
             self.assertEqual(result['status'],'installed')
             self.assertEqual(json.loads((runtime/'deployment.json').read_text())['version'],__version__)
-            with sqlite3.connect(data/'state.sqlite') as db:
+            with closing(sqlite3.connect(data/'state.sqlite')) as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM revisions').fetchone()[0],1)
             rollback_code(runtime,Path(result['backup']))
             self.assertEqual((runtime/'context_hub/__init__.py').read_text(),'old')
@@ -83,3 +84,23 @@ class UpgradeTests(unittest.TestCase):
             root=Path(t)/'missing'
             self.assertEqual(inspect(root)['status'],'not_started')
             self.assertFalse(root.exists())
+
+    def test_refused_legacy_rollback_closes_both_read_handles(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);backup=root/'backups/release-test'
+            (backup/'runtime/context_hub').mkdir(parents=True)
+            (backup/'runtime/context_hub/__init__.py').write_text('old')
+            (backup/'data').mkdir()
+            for path,count in ((backup/'data/archive.sqlite',1),(root/'state.sqlite',2)):
+                with closing(sqlite3.connect(path)) as db:
+                    db.executescript('CREATE TABLE revisions(id); CREATE TABLE heads(adapter,session,source_key);')
+                    db.executemany('INSERT INTO revisions VALUES (?)',[(i,) for i in range(count)]);db.commit()
+            opened=[];closed=[];connect=sqlite3.connect
+            class Tracked(sqlite3.Connection):
+                def close(self):closed.append(self);super().close()
+            def tracked(*args,**kwargs):
+                value=connect(*args,**kwargs,factory=Tracked);opened.append(value);return value
+            with patch('context_hub.upgrade.sqlite3.connect',side_effect=tracked):
+                with self.assertRaisesRegex(ValueError,'New archive work exists'):
+                    rollback_code(root/'app',backup)
+            self.assertEqual(len(opened),2);self.assertEqual(closed,opened[::-1])

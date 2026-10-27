@@ -12,6 +12,7 @@ MVP scope:
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -104,7 +105,7 @@ def _render(
         db = home / filename
         if db.exists():
             import sqlite3
-            with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as check:
+            with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as check:
                 if check.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1', (uuid,)).fetchone():
                     raise ValueError('Existing session ID is protected; export to a new mirror')
     out_path.parent.mkdir(parents=True, exist_ok=True)
