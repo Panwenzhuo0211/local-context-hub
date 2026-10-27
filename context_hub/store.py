@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS head_revision ON heads(revision_id);
 '''
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, migration_locked=False):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.log_dir = self.root/'log'
@@ -119,9 +119,12 @@ class Store:
         self._hot=None; self._hot_path=None
         self._hot_index=self._highest_segment()
         if (self.root/'archive.sqlite').exists() and not (self.root/'state.sqlite').exists():
-            with exclusive(self.root):
-                if (self.root/'archive.sqlite').exists() and not (self.root/'state.sqlite').exists():
-                    self._migrate_v1()
+            if migration_locked:
+                self._migrate_v1()
+            else:
+                with exclusive(self.root):
+                    if not (self.root/'state.sqlite').exists():
+                        self._migrate_v1()
         self.db = sqlite3.connect(self.root/'state.sqlite')
         try: os.chmod(self.root/'state.sqlite',0o600)
         except OSError: pass
@@ -324,8 +327,11 @@ class Store:
     def _migrate_v1(self):
         """v1 archive.sqlite -> state store + segment log; the old file is kept."""
         old=self.root/'archive.sqlite'
-        src=sqlite3.connect(old); src.row_factory=sqlite3.Row
-        dest=sqlite3.connect(self.root/'state.sqlite')
+        src=sqlite3.connect(old.as_uri()+'?mode=ro',uri=True); src.row_factory=sqlite3.Row
+        import tempfile
+        fd,temp=tempfile.mkstemp(prefix='.state-migration-',suffix='.sqlite',dir=self.root)
+        os.close(fd)
+        dest=sqlite3.connect(temp)
         try:
             dest.executescript(STATE_SCHEMA)
             dest.execute('BEGIN')
@@ -342,6 +348,10 @@ class Store:
                     dest.execute(f'INSERT OR REPLACE INTO {table} VALUES ({",".join("?"*len(r))})',tuple(r))
             dest.commit()
             self.flush_log()
+            if dest.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+                raise ValueError('Migrated state failed integrity check')
         finally:
             dest.close(); src.close()
-        old.rename(old.parent/(old.name+'.migrated-v1'))
+        # Publish only a complete state DB. The original archive remains untouched
+        # for old connected clients and rollback; orphan frames on failure are safe.
+        os.replace(temp,self.root/'state.sqlite')

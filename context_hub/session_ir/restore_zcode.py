@@ -13,13 +13,15 @@ from __future__ import annotations
 import json
 import logging
 import zlib
+import sqlite3
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from ..store import read_blob
 from ..model import digest
 from .ids import deterministic_uuid7, fmt_iso_z
 from .schema import (Session, UserText, AssistantText, Thinking, ToolCall,
-                     ToolResult, PlanUpdate, Metadata)
+                     ToolResult, PlanUpdate, Metadata, Attachment)
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +57,36 @@ def restore_from_archive(store, session_id: str) -> Session:
     if not heads:
         raise ValueError('Session not found in archive heads: ' + session_id)
 
+    envelopes = [json.loads(zlib.decompress(read_blob(store.root, r['seg'], r['off'], r['len'])))
+                 for r in heads]
+    # A selected-session source snapshot restores parts whose forensic raw was
+    # capped in older archives. Never scan unrelated sessions or mutate the source.
+    config_path = store.root / 'config.json'
+    if config_path.exists():
+        config = json.loads(config_path.read_text(encoding='utf-8'))
+        source_root = config.get('sources', {}).get('zcode')
+        source_db = Path(source_root) / 'cli/db/db.sqlite' if source_root else None
+        if source_db and source_db.is_file():
+            from ..adapters import readonly
+            with readonly(source_db) as con:
+                header = con.execute('SELECT * FROM session WHERE id=?', (session_id,)).fetchone()
+                if header:
+                    live = [{'source_key': 'session:' + session_id, 'raw': dict(header)}]
+                    for table, prefix in (('message', 'message:'), ('part', 'part:')):
+                        for row in con.execute(f'SELECT * FROM {table} WHERE session_id=?', (session_id,)):
+                            live.append({'source_key': prefix + row['id'], 'raw': dict(row)})
+                    try:
+                        for row in con.execute('SELECT * FROM todo WHERE session_id=?', (session_id,)):
+                            live.append({'source_key': 'todo:' + str(row['position']), 'raw': dict(row)})
+                    except sqlite3.OperationalError:
+                        pass
+                    envelopes = live
     session_row = None
     roles = {}
     parts = []
     todos = []
-    for row in heads:
-        envelope = json.loads(zlib.decompress(read_blob(store.root, row['seg'], row['off'], row['len'])))
+    unavailable = []
+    for envelope in envelopes:
         raw = envelope.get('raw', {})
         # Dispatch by source_key prefix: the envelope kind of a part row is its
         # content type ('text'/'tool'/...), not a stable structural tag.
@@ -78,7 +104,13 @@ def restore_from_archive(store, session_id: str) -> Session:
                 parts.append((raw.get('time_created') or 0, raw.get('id') or '',
                               raw.get('message_id') or '', json.loads(raw['data'])))
             except (ValueError, KeyError, TypeError):
-                continue
+                if envelope.get('text') and not raw.get('_raw_truncated'):
+                    mid = 'fallback:' + key
+                    roles[mid] = (envelope.get('role'), envelope.get('timestamp'))
+                    parts.append((envelope.get('timestamp') or 0, key, mid,
+                                  {'type': 'text', 'text': envelope['text']}))
+                else:
+                    unavailable.append(key)
         elif key.startswith('todo:'):
             todos.append(raw)
 
@@ -126,7 +158,17 @@ def restore_from_archive(store, session_id: str) -> Session:
             text = data.get('text') or ''
             if not text:
                 continue
-            if role == 'user':
+            metadata = data.get('metadata') or {}
+            runtime = metadata.get('runtimeMessage') or {}
+            generated = (data.get('synthetic') is True or
+                         metadata.get('visibility') == 'model-only' or
+                         runtime.get('source') is not None)
+            ref = {'part': part_id, 'message': message_id}
+            if generated:
+                moments.append(Attachment(ts=ts, subtype='historical_runtime',
+                    data={'content': text, 'source': runtime.get('source') or
+                          metadata.get('source') or 'synthetic'}, source_ref=ref))
+            elif role == 'user':
                 moments.append(UserText(ts=ts, text=text,
                                         source_ref={'part': part_id}))
             else:
@@ -175,5 +217,9 @@ def restore_from_archive(store, session_id: str) -> Session:
 
     session.moments = moments
     session.source_metadata['counts'] = {
-        'parts': len(parts), 'moments': len(moments), 'todos': len(todos)}
+        'parts': len(parts), 'moments': len(moments), 'todos': len(todos),
+        'unavailable_parts': len(unavailable)}
+    session.source_metadata['unavailable_parts'] = unavailable
+    if unavailable:
+        raise ValueError(f'{len(unavailable)} archived parts cannot be restored; refresh the selected session from its source before exporting')
     return session

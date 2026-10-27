@@ -166,8 +166,8 @@ class HubTests(unittest.TestCase):
                 from context_hub.model import unpack
                 e=unpack(store.envelope_of(row));self.assertEqual(e['text'],'迁移内容')
                 self.assertEqual(store.db.execute('SELECT value FROM cursors WHERE key=?',('k',)).fetchone()[0],'{"v":1}')
-                self.assertTrue((hub/'archive.sqlite.migrated-v1').exists())
-                self.assertFalse((hub/'archive.sqlite').exists())
+                self.assertTrue((hub/'archive.sqlite').exists())
+                self.assertTrue((hub/'state.sqlite').exists())
             finally:store.close()
     def test_paginated_history_and_realtime(self):
         c=sqlite3.connect(self.codex/'thread_history_1.sqlite')

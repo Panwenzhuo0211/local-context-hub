@@ -49,6 +49,13 @@ class MattersTests(unittest.TestCase):
         self.m.link(self.patent,'session','zcode:z','标题误判',status='rejected')
         self.m.index()
         self.assertFalse(self.m.search('发明专利',self.patent))
+
+    def test_revoked_scope_applies_before_next_projection(self):
+        self.m.link(self.patent,'session','zcode:z','confirmed')
+        self.m.index()
+        self.assertTrue(self.m.search('发明专利',self.patent))
+        self.m.link(self.patent,'session','zcode:z','revoked',status='rejected')
+        self.assertFalse(self.m.search('发明专利',self.patent))
     def test_idempotence_revision_and_reversion(self):
         self.assertEqual(self.m.index()['changed_heads'],0)
         self.add('codex','c','message:1','/code','text',text='已经改变的技术交底')
@@ -222,7 +229,15 @@ class MattersTests(unittest.TestCase):
                 self.assertEqual(r1['codex_session_id'],r2['codex_session_id'])
                 r3=server.call('prepare_resume',{'session':'zcode:z','refresh':True})
                 self.assertFalse(r3['mirror'])  # forced re-export, same id (idempotent)
-                self.assertEqual(r3['codex_session_id'],r1['codex_session_id'])
+                self.assertNotEqual(r3['codex_session_id'],r1['codex_session_id'])
+                self.assertEqual(r3['previous_mirror_id'],r1['codex_session_id'])
+                self.assertTrue(Path(r1['path']).exists())
+                changed=Path(r3['path']).read_bytes()+b'new user work\n'
+                Path(r3['path']).write_bytes(changed)
+                r4=server.call('prepare_resume',{'session':'zcode:z'})
+                self.assertFalse(r4['mirror'])
+                self.assertEqual(r4['previous_mirror_id'],r3['codex_session_id'])
+                self.assertEqual(Path(r3['path']).read_bytes(),changed)
                 with self.assertRaises(ValueError):
                     server.call('prepare_resume',{'session':'codex:c'})
             finally:
@@ -235,6 +250,22 @@ class MattersTests(unittest.TestCase):
         self.assertTrue(out.name=='report.html')
         self.assertIn('示例专利事项',text)
         self.assertIn('运行报告',text)
+
+    def test_capture_receipt_is_attributed_not_a_semantic_summary(self):
+        r=self.m.context('专利')
+        self.assertTrue(r['recovery_receipt']['retrieved'])
+        self.assertFalse(r['recovery_receipt']['handoff_verified'])
+        self.assertTrue(r['checkpoints'])
+        self.assertTrue(all(not p['semantic_summary'] and p['untrusted'] for p in r['checkpoints']))
+        self.assertGreater(self.m.db.execute('SELECT count(*) FROM session_checkpoints').fetchone()[0],0)
+
+    def test_local_report_escapes_archived_note_html(self):
+        from context_hub.report import render
+        self.m.remember(self.patent,'codex','opinion','<script>unsafe</script>','<img src=x onerror=bad()>',[])
+        page=render(self.root).read_text()
+        self.assertNotIn('<script>unsafe</script>',page)
+        self.assertIn('&lt;script&gt;unsafe&lt;/script&gt;',page)
+        self.assertNotIn('<img src=x',page)
 
     def test_output_boundaries_and_root_prefix(self):
         self.m.link(self.patent,'root',self.code,'explicit')

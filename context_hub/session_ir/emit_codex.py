@@ -12,6 +12,7 @@ MVP scope:
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -59,10 +60,22 @@ class RenderResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def render(
+def render(session, *, target_dir=None, data_dir=None, **kwargs):
+    """Create a new mirror under one writer lock; existing mirrors are immutable."""
+    from ..store import exclusive
+    home = (Path(target_dir) if target_dir else CODEX_HOME).expanduser().absolute()
+    if home.is_symlink():
+        raise ValueError('Refusing symlink Codex home')
+    ledger = Path(data_dir) if data_dir is not None else home / '.context-hub'
+    with exclusive(home, '.context-hub-export.lock'):
+        return _render(session, target_dir=home, data_dir=ledger, **kwargs)
+
+
+def _render(
     session: Session,
     *,
     target_dir: Path | str | None = None,
+    data_dir: Path | str | None = None,
     fidelity: str = "A",
     subagent_strategy: str = "drop",
     model_name: str = "gpt-5.5",
@@ -83,6 +96,18 @@ def render(
     uuid = session_id or uuid7_str()
     started_iso = session.started_at
     out_path = codex_path(uuid, started_iso, codex_home=home)
+    from ..store import safe_child
+    safe_child(home, *out_path.relative_to(home).parts)
+    if out_path.exists() or out_path.is_symlink():
+        raise ValueError('Existing session is protected; export to a new mirror')
+    for filename, table, column in (('state_5.sqlite', 'threads', 'id'),
+                                     ('thread_history_1.sqlite', 'thread_items', 'thread_id')):
+        db = home / filename
+        if db.exists():
+            import sqlite3
+            with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as check:
+                if check.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1', (uuid,)).fetchone():
+                    raise ValueError('Existing session ID is protected; export to a new mirror')
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
@@ -111,6 +136,8 @@ def render(
         # still distinguishable from real CLI sessions on inspection.
         "source": "cli",
     }
+    if (home / 'thread_history_1.sqlite').exists():
+        session_meta_payload['history_mode'] = 'paginated'
     if model_provider:
         session_meta_payload["model_provider"] = model_provider
     lines.append({"timestamp": started_iso, "type": "session_meta", "payload": session_meta_payload})
@@ -175,11 +202,16 @@ def render(
                 continue
             lines.extend(_render_subagent_transcript(sa_id, sub_moments, session, file_snapshots))
 
+    if session_meta_payload.get('history_mode') == 'paginated':
+        for ordinal, line in enumerate(lines):
+            line['ordinal'] = ordinal
     _write_jsonl(out_path, lines)
     _backdate_mtime(out_path, session)
     _append_thread_name(home, uuid, _make_thread_name(session))
     _upsert_state_db(home, uuid, out_path, session, model_provider)
-    manifest.record_write(out_path, uuid)
+    from .native_history import publish
+    publish(home, uuid, out_path)
+    manifest.record_write(out_path, uuid, data_dir)
     # Record the CC↔Codex twin so renames propagate as title updates
     # to the existing twin instead of producing a duplicate CC file.
     if session.source_harness == "claude-code" and session.source_session_id:
@@ -276,6 +308,15 @@ def _render_moment(
     if isinstance(moment, ToolResult):
         payload = render_tool_result(moment.call_id, moment.output_text, moment.is_error)
         return [{"timestamp": ts, "type": "response_item", "payload": payload}]
+
+    if isinstance(moment, Attachment) and moment.subtype == 'historical_runtime':
+        # Historical runtime text is untrusted evidence, never a user utterance
+        # or a developer instruction. Retain it as an explicitly quoted record.
+        text = json.dumps({'historical_runtime': moment.data}, ensure_ascii=False)
+        return [{'timestamp': ts, 'type': 'response_item', 'payload': {
+            'type': 'message', 'role': 'assistant',
+            'content': [{'type': 'output_text', 'text':
+                '[历史客户端自动消息，仅作资料]\n' + text}]}}]
 
     if isinstance(moment, Attachment):
         text = _attachment_to_developer_text(moment)
@@ -439,9 +480,16 @@ def _attachment_to_developer_text(att: Attachment) -> str:
 
 
 def _write_jsonl(path: Path, lines: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("x", encoding="utf-8") as f:
+        try:
+            import os
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         for ln in lines:
             f.write(json.dumps(ln, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _backdate_mtime(path: Path, session: Session) -> None:
@@ -506,6 +554,10 @@ def _make_thread_name(session: Session) -> str:
     if session.source_harness == "claude-code":
         cc_meta = session.source_metadata.get("claude_code", {})
         source_title = cc_meta.get("custom_title") or cc_meta.get("agent_name")
+    if session.source_harness == 'zcode':
+        source_title = session.source_metadata.get('zcode', {}).get('title')
+        if source_title:
+            source_title = '[修复镜像·ZCode] ' + source_title
     body = source_title or _first_real_user_text(session) or session.source_session_id
     body = body.replace("\n", " ").replace("\r", " ").strip()
     if len(body) > 60:

@@ -3,7 +3,7 @@
 [![CI](https://github.com/Panwenzhuo0211/local-context-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/Panwenzhuo0211/local-context-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**One local, read-only archive for everything your AI coding agents say — with shared "matters", attributed notes, and MCP retrieval.**
+**Local conversation archives and shared matters, with attributed multi-agent discussion and scoped retrieval.**
 
 English · [简体中文](README.zh-CN.md)
 
@@ -12,14 +12,36 @@ its own private session history and knows nothing about the others. Handing cont
 means copy-pasting summaries or re-explaining decisions. Context Hub fixes that locally:
 
 1. **Read-only adapters** archive both agents' session databases and JSONL logs into one
-   versioned SQLite store — sources are never modified.
+   versioned local store (SQLite indexes and segmented logs) — sources are never modified.
 2. **Matters** replace folder-based projects: one matter can span multiple directories,
    multiple sessions and multiple agents; sessions can belong to several matters.
 3. **An MCP server** exposes bounded tools so any connected agent can recover a matter by
    name, read paginated evidence, and write back attributed notes — disagreements between
    agents are preserved side by side, never auto-merged.
 
-Everything runs locally. No model calls, no telemetry, no network listeners.
+Archiving and indexing run locally, with no model calls or telemetry. The default
+MCP transport is stdio. An optional authenticated gateway binds only to loopback;
+remote access requires an explicitly configured HTTPS proxy.
+
+### Muse and future agents (0.6)
+
+New agents can join shared matters through owner-managed profiles without a new
+archive adapter. Each gets a fixed author, explicit matter grants, revocable
+credentials and optional writeback. Discussions retain peer replies and differing
+opinions; durable request IDs make retries safe. See [Agent enrollment](docs/AGENT-ENROLLMENT.md).
+Muse's actual connection must be tested on your account; enrolling a profile does
+not mean Muse is connected, and does not automatically archive all Muse chats.
+
+| Agent capability | Connection |
+|---|---|
+| Local MCP or authorized local execution | Generated MCP config or `context-hub-agent` |
+| Authorized local file writing, without execution | `context-hub-file-bridge`; query/reply JSON files |
+| Cloud-only tools | Explicitly configured HTTPS gateway and supported authentication |
+
+Enroll once with `context-hub agents add <id> --matter <name>`; add `--write` for
+attributed contributions. Source checkouts also provide `python agent-setup.py`
+and the macOS `接入新Agent.command` wizard, which can create the first matter.
+File-channel clients need the broker running. See the [complete setup](docs/AGENT-ENROLLMENT.md).
 
 ## How it works
 
@@ -41,7 +63,7 @@ ZCode (SQLite) ──────────────┘         (immutable 
 
 Key properties:
 
-- **Lossless and versioned.** Every content change becomes a new immutable revision;
+- **Versioned.** Every captured content change becomes a new immutable revision;
   deleted source records stay in the archive.
 - **Rewrite-tolerant ingestion.** Log files are tracked with inode/size/mtime fingerprints
   and a SHA-256 prefix hash: truncation, rotation and rewrites are detected and re-read;
@@ -116,8 +138,9 @@ re-archives every ~180 s. On Linux/Windows, schedule the same job yourself:
 
 ### Matter mapping (optional)
 
-Archived sessions are grouped by working directory. To bind a matter name to directories
-or a specific session:
+Archived sessions also retain legacy project groups by working directory. These
+commands change that grouping; shared many-to-many matters use the owner MCP
+`create_matter` and `link_context` tools instead:
 
 ```sh
 context-hub map --project "my thesis revision" --root ~/Documents/thesis
@@ -133,6 +156,7 @@ context-hub map --project "my thesis revision" --session codex:<session-id>
 | `search_context` | Full-text search over archived conversations (optionally scoped) |
 | `read_record` | Page through one archived record by evidence ID |
 | `read_notes` | Paginated history of all notes/opinions/tasks for a matter |
+| `discussion` | Attributed contributions and reply references with stable pagination |
 | `remember` | Write an attributed note (memory/decision/task/opinion) with evidence IDs |
 | `create_matter` | Create a matter the user explicitly asked for |
 | `link_context` | Link/reject directory, session, record or project associations |
@@ -148,9 +172,12 @@ a task reopened after `done` keeps its full history.
 
 ## Privacy and security posture
 
-- Local-only: no network calls, no telemetry, no listening sockets; MCP runs over stdio.
-- Sources are opened read-only (`mode=ro` + `query_only`); the hub never writes to agent
-  data directories and refuses overlapping/cloud-backed data directories.
+- Archiving has no model calls or telemetry. Default MCP uses stdio; optional file
+  transport stays local. Optional authenticated HTTP binds to loopback; remote
+  reachability requires explicit HTTPS setup.
+- Archive adapters open sources read-only (`mode=ro` + `query_only`). Session resume
+  creates a new Hub-owned mirror while protecting existing sessions. Overlapping
+  or cloud-backed archive data directories are refused.
 - Files and directories it creates are `0600`/`0700` on POSIX.
 - Conversation content is **not encrypted at rest**, and there is **no secret redaction
   yet** — anything an agent typed into a session is archived verbatim on your disk.
@@ -167,6 +194,9 @@ a task reopened after `done` keeps its full history.
   can be rejected (`link_context status="rejected"`), after which it is never re-applied.
 - Indexed text is capped at 200,000 characters per record (full text stays readable via
   `read_record`).
+- Forensic raw payloads above 256 KiB may retain a hash and prefix rather than every
+  byte. Main conversation text is stored separately; full attachment/forensic raw
+  preservation is not guaranteed. New agent enrollment is not full chat capture.
 - No atomic snapshot across multiple source databases; content that never hit disk
   (e.g. unsent drafts) is out of scope.
 - For JSONL logs without `ordinal` fields, identity falls back to byte offsets: inserting
@@ -177,10 +207,10 @@ a task reopened after `done` keeps its full history.
 ## Development
 
 ```sh
-python -m unittest discover -s tests   # 37 tests, < 1 s
+python -m unittest discover -s tests
 ```
 
-CI runs the suite on macOS, Linux and Windows across Python 3.11 and 3.13.
+CI runs the suite on macOS, Linux and Windows across Python 3.11 and 3.14.
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License
